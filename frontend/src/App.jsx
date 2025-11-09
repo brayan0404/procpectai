@@ -157,7 +157,7 @@ function App() {
           <>
             <div className="chat-header">
               <h1>ProspectAI</h1>
-              <p>Encuentra y conecta con tus próximos clientes</p>
+              <p>Encuentra y contacta clientes en segundos</p>
             </div>
 
             <div className="chat-content">
@@ -296,12 +296,7 @@ function App() {
                         </td>
                         <td className="address-cell">
                           <div className="address-content">
-                            <div>{place.address || '—'}</div>
-                            {place.lat && place.lng && (
-                              <div className="coords">
-                                {place.lat.toFixed(4)}, {place.lng.toFixed(4)}
-                              </div>
-                            )}
+                            {place.address || '—'}
                           </div>
                         </td>
                         <td className="phone-cell">
