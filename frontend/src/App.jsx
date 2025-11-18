@@ -219,7 +219,7 @@ function App() {
                 <button 
                   className="send-button" 
                   onClick={() => handleSearch()}
-                  disabled={loading}
+                  disabled
                 >
                   →
                 </button>
