@@ -5,6 +5,9 @@ import * as XLSX from 'xlsx'
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 function App() {
+  // Estado para mostrar mensaje de mantenimiento
+  const [showMaintenance, setShowMaintenance] = useState(true);
+  
   const [query, setQuery] = useState('');
   const [city, setCity] = useState('');
   const [country, setCountry] = useState('');
@@ -151,6 +154,30 @@ function App() {
 
   return (
     <div className="app">
+      {/* Mensaje de mantenimiento */}
+      {showMaintenance && (
+        <div className="maintenance-overlay">
+          <div className="maintenance-modal">
+            <div className="maintenance-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 6v6l4 2"/>
+              </svg>
+            </div>
+            <h2>Beta Cerrada</h2>
+            <p>Estamos implementando mejoras para ofrecerte una mejor experiencia.</p>
+            <p className="maintenance-details">
+              Gracias por probar ProspectAI. Hemos recibido una respuesta increíble y estamos 
+              optimizando la plataforma para soportar más usuarios y agregar nuevas funcionalidades.
+            </p>
+            <p className="maintenance-eta">Volveremos pronto con novedades increíbles.</p>
+            <button className="maintenance-close" onClick={() => setShowMaintenance(false)}>
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
+      
       {showSearch && <div className="logo-corner">P</div>}
       <div className={`chat-container ${!showSearch && results.length > 0 ? 'has-results' : ''}`}>
         {showSearch && (
