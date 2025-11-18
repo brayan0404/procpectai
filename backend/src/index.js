@@ -71,29 +71,64 @@ app.get("/search", async (req, res) => {
         );
 
         const p = detailResp.data.result;
+        
+        // Validar que existan datos mínimos
+        if (!p || !p.name) {
+          console.error(`Place ${place.place_id} sin datos completos, usando datos básicos`);
+          return {
+            name: place.name,
+            address: place.formatted_address || null,
+            rating: place.rating || null,
+            user_ratings_total: place.user_ratings_total || null,
+            phone: null,
+            international_phone: null,
+            website: null,
+            opening_hours: null,
+            price_level: null,
+            types: place.types || [],
+            lat: place.geometry?.location?.lat || null,
+            lng: place.geometry?.location?.lng || null,
+            maps_url: `https://www.google.com/maps/place/?q=place_id:${place.place_id}`
+          };
+        }
 
         return {
           name: p.name,
-          address: p.formatted_address,
-          rating: p.rating,
-          user_ratings_total: p.user_ratings_total,
+          address: p.formatted_address || null,
+          rating: p.rating || null,
+          user_ratings_total: p.user_ratings_total || null,
           phone: p.formatted_phone_number || null,
           international_phone: p.international_phone_number || null,
           website: p.website || null,
           opening_hours: p.opening_hours?.weekday_text || null,
           price_level: p.price_level || null,
           types: p.types || [],
-          lat: p.geometry.location.lat,
-          lng: p.geometry.location.lng,
+          lat: p.geometry?.location?.lat || null,
+          lng: p.geometry?.location?.lng || null,
           maps_url: `https://www.google.com/maps/place/?q=place_id:${p.place_id}`
         };
       } catch (err) {
         console.error(`Error en detalles de place_id ${place.place_id}:`, err.response?.data || err.message);
-        return null;
+        // Fallback a datos básicos si falla el detail
+        return {
+          name: place.name,
+          address: place.formatted_address || null,
+          rating: place.rating || null,
+          user_ratings_total: place.user_ratings_total || null,
+          phone: null,
+          international_phone: null,
+          website: null,
+          opening_hours: null,
+          price_level: null,
+          types: place.types || [],
+          lat: place.geometry?.location?.lat || null,
+          lng: place.geometry?.location?.lng || null,
+          maps_url: `https://www.google.com/maps/place/?q=place_id:${place.place_id}`
+        };
       }
     });
 
-    const detailedPlaces = (await Promise.all(detailedPlacesPromises)).filter(p => p !== null);
+    const detailedPlaces = (await Promise.all(detailedPlacesPromises)).filter(p => p !== null && p.name);
 
     res.json({
       results: detailedPlaces,
@@ -108,3 +143,15 @@ app.get("/search", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
+
+
+
+
+/*
+
+Hola soy brayan fundador de prospectai. Las empresas que venden b2b y tienen a google maps como una 
+herramienta para obtener leads pierden varias horas a la semana, por que es la bsuqeda y organizacion
+de estos datos lo realizan de forma manual. Prospectai te permite buscar por tipo de negocio y en menos
+de 10 segundos obtienes una lista con miles de posibles clientes.
+*/
