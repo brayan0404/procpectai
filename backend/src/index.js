@@ -3,19 +3,134 @@ const cors = require("cors");
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, '../.env') });
 const axios = require("axios");
+const { createClient } = require('@supabase/supabase-js');
 
 const PORT = process.env.PORT || 3000;
 const app = express();
+
+// Supabase client
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.get("/search", async (req, res) => {
+// Middleware de autenticación
+async function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'No se proporcionó token de autenticación' });
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    
+    if (error || !user) {
+      return res.status(401).json({ error: 'Token inválido o expirado' });
+    }
+
+    // Obtener perfil del usuario
+    const { data: profile, error: profileError } = await supabase
+      .from('user_profiles')
+      .select('*')
+      .eq('id', user.id)
+      .single();
+
+    if (profileError || !profile) {
+      return res.status(404).json({ error: 'Perfil de usuario no encontrado' });
+    }
+
+    req.user = user;
+    req.userProfile = profile;
+    next();
+  } catch (err) {
+    console.error('Error en autenticación:', err);
+    return res.status(500).json({ error: 'Error al verificar autenticación' });
+  }
+}
+
+// Endpoint para obtener bounds de una ciudad
+app.get("/geocode", async (req, res) => {
+  const { city, country } = req.query;
+
+  if (!city || !country) {
+    return res.status(400).json({ error: "Debes enviar city y country" });
+  }
+
+  try {
+    const response = await axios.get(
+      "https://maps.googleapis.com/maps/api/geocode/json",
+      {
+        params: {
+          address: `${city}, ${country}`,
+          key: process.env.PLACES_API_KEY
+        }
+      }
+    );
+
+    if (response.data.status !== "OK" || !response.data.results.length) {
+      return res.status(404).json({ error: "Ciudad no encontrada" });
+    }
+
+    const result = response.data.results[0];
+    res.json({
+      bounds: result.geometry.bounds || result.geometry.viewport,
+      location: result.geometry.location
+    });
+  } catch (err) {
+    console.error("Error en geocoding:", err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
+
+// Función para dividir bounds en grids
+function createGrids(bounds, gridSize = 5) {
+  const { northeast, southwest } = bounds;
+  const latStep = (northeast.lat - southwest.lat) / gridSize;
+  const lngStep = (northeast.lng - southwest.lng) / gridSize;
+  
+  const grids = [];
+  
+  for (let i = 0; i < gridSize; i++) {
+    for (let j = 0; j < gridSize; j++) {
+      const centerLat = southwest.lat + (i + 0.5) * latStep;
+      const centerLng = southwest.lng + (j + 0.5) * lngStep;
+      
+      // Radio aproximado para cubrir el grid (diagonal / 2)
+      const latDistance = latStep * 111000; // ~111km por grado de latitud
+      const lngDistance = lngStep * 111000 * Math.cos(centerLat * Math.PI / 180);
+      const radius = Math.sqrt(latDistance * latDistance + lngDistance * lngDistance) / 2;
+      
+      grids.push({
+        center: { lat: centerLat, lng: centerLng },
+        radius: Math.min(radius, 50000) // Máximo 50km permitido por Google
+      });
+    }
+  }
+  
+  return grids;
+}
+
+app.get("/search", authMiddleware, async (req, res) => {
   const { query, city, country, pageToken } = req.query;
+  const userProfile = req.userProfile;
 
   if (!query) {
     return res.status(400).json({ error: "Debes enviar query" });
+  }
+
+  // Verificar límite de resultados del usuario
+  if (userProfile.results_shown >= userProfile.total_results_limit) {
+    return res.status(403).json({ 
+      error: `Has alcanzado tu límite de ${userProfile.total_results_limit} resultados. ${userProfile.plan === 'free' ? 'Contacta para actualizar a Plan Premium.' : ''}`,
+      limit_reached: true
+    });
   }
 
   // Validación de ubicación
@@ -28,111 +143,154 @@ app.get("/search", async (req, res) => {
   else if (country) locationBias = country;
 
   try {
-    const params = {
-      query: query + (locationBias ? ` in ${locationBias}` : ""),
-      key: process.env.PLACES_API_KEY
-    };
-    if (pageToken) params.pagetoken = pageToken;
+    let allPlaceIds = new Set();
 
-    // Text Search
-    const response = await axios.get(
-      "https://maps.googleapis.com/maps/api/place/textsearch/json",
-      { params }
+    // Validar que se envíe ciudad y país (obligatorio para grids)
+    if (!city || !country) {
+      return res.status(400).json({ error: "Debes enviar city y country para búsqueda con grids" });
+    }
+
+    console.log(`Búsqueda con grids para: ${city}, ${country}`);
+    
+    // 1. Obtener bounds de la ciudad
+    const geocodeResp = await axios.get(
+      "https://maps.googleapis.com/maps/api/geocode/json",
+      {
+        params: {
+          address: `${city}, ${country}`,
+          key: process.env.PLACES_API_KEY
+        }
+      }
     );
 
-    const placesBasic = response.data.results;
-    const nextPageToken = response.data.next_page_token || null;
+    console.log("Geocoding status:", geocodeResp.data.status);
+    console.log("Geocoding error message:", geocodeResp.data.error_message);
+    console.log("Geocoding results:", geocodeResp.data.results?.length || 0);
 
-    // Place Details sin fotos
-    const detailedPlacesPromises = placesBasic.map(async place => {
+    if (geocodeResp.data.status !== "OK" || !geocodeResp.data.results.length) {
+      return res.status(404).json({ 
+        error: "Ciudad no encontrada",
+        geocodingStatus: geocodeResp.data.status,
+        geocodingError: geocodeResp.data.error_message
+      });
+    }
+
+    const bounds = geocodeResp.data.results[0].geometry.bounds || 
+                   geocodeResp.data.results[0].geometry.viewport;
+    
+    // 2. Dividir en grids (10x10 = 100 búsquedas)
+    const grids = createGrids(bounds, 10);
+    console.log(`Ciudad dividida en ${grids.length} grids`);
+
+    // 3. Buscar en cada grid (solo IDs) con paginación automática
+    const gridSearchPromises = grids.map(async (grid, index) => {
       try {
-        const detailResp = await axios.get(
-          "https://maps.googleapis.com/maps/api/place/details/json",
-          {
-            params: {
-              place_id: place.place_id,
-              key: process.env.PLACES_API_KEY,
-              fields: [
-                "name",
-                "formatted_address",
-                "geometry",
-                "rating",
-                "user_ratings_total",
-                "formatted_phone_number",
-                "international_phone_number",
-                "website",
-                "opening_hours",
-                "price_level",
-                "types",
-                "place_id"
-              ].join(",")
+        const gridPlaceIds = [];
+        let pageToken = null;
+        let pageCount = 0;
+        const maxPages = 3; // Máximo 3 páginas por grid (20 * 3 = 60 resultados max)
+
+        do {
+          const textSearchBody = {
+            textQuery: query,
+            maxResultCount: 20,
+            locationBias: {
+              circle: {
+                center: {
+                  latitude: grid.center.lat,
+                  longitude: grid.center.lng
+                },
+                radius: grid.radius
+              }
             }
-          }
-        );
-
-        const p = detailResp.data.result;
-        
-        // Validar que existan datos mínimos
-        if (!p || !p.name) {
-          console.error(`Place ${place.place_id} sin datos completos, usando datos básicos`);
-          return {
-            name: place.name,
-            address: place.formatted_address || null,
-            rating: place.rating || null,
-            user_ratings_total: place.user_ratings_total || null,
-            phone: null,
-            international_phone: null,
-            website: null,
-            opening_hours: null,
-            price_level: null,
-            types: place.types || [],
-            lat: place.geometry?.location?.lat || null,
-            lng: place.geometry?.location?.lng || null,
-            maps_url: `https://www.google.com/maps/place/?q=place_id:${place.place_id}`
           };
-        }
 
-        return {
-          name: p.name,
-          address: p.formatted_address || null,
-          rating: p.rating || null,
-          user_ratings_total: p.user_ratings_total || null,
-          phone: p.formatted_phone_number || null,
-          international_phone: p.international_phone_number || null,
-          website: p.website || null,
-          opening_hours: p.opening_hours?.weekday_text || null,
-          price_level: p.price_level || null,
-          types: p.types || [],
-          lat: p.geometry?.location?.lat || null,
-          lng: p.geometry?.location?.lng || null,
-          maps_url: `https://www.google.com/maps/place/?q=place_id:${p.place_id}`
-        };
+          // Agregar pageToken solo si existe
+          if (pageToken) {
+            textSearchBody.pageToken = pageToken;
+          }
+
+          const response = await axios.post(
+            "https://places.googleapis.com/v1/places:searchText",
+            textSearchBody,
+            {
+              headers: {
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": process.env.PLACES_API_KEY,
+                "X-Goog-FieldMask": "places.id,nextPageToken"
+              }
+            }
+          );
+
+          const placeIds = (response.data.places || []).map(p => p.id);
+          gridPlaceIds.push(...placeIds);
+          
+          pageToken = response.data.nextPageToken;
+          pageCount++;
+
+          console.log(`Grid ${index + 1}, página ${pageCount}: ${placeIds.length} lugares (total grid: ${gridPlaceIds.length})`);
+          
+          if (gridPlaceIds.length > 0 && pageCount === 1) {
+            console.log(`Ejemplo de ID del grid ${index + 1}:`, gridPlaceIds[0]);
+          }
+
+          // Detener si no hay más páginas o alcanzamos el límite
+          if (!pageToken || pageCount >= maxPages) {
+            break;
+          }
+
+        } while (pageToken);
+
+        return gridPlaceIds;
       } catch (err) {
-        console.error(`Error en detalles de place_id ${place.place_id}:`, err.response?.data || err.message);
-        // Fallback a datos básicos si falla el detail
-        return {
-          name: place.name,
-          address: place.formatted_address || null,
-          rating: place.rating || null,
-          user_ratings_total: place.user_ratings_total || null,
-          phone: null,
-          international_phone: null,
-          website: null,
-          opening_hours: null,
-          price_level: null,
-          types: place.types || [],
-          lat: place.geometry?.location?.lat || null,
-          lng: place.geometry?.location?.lng || null,
-          maps_url: `https://www.google.com/maps/place/?q=place_id:${place.place_id}`
-        };
+        console.error(`Error en grid ${index + 1}:`, err.response?.data || err.message);
+        return [];
       }
     });
 
-    const detailedPlaces = (await Promise.all(detailedPlacesPromises)).filter(p => p !== null && p.name);
+    // Ejecutar todas las búsquedas de grids en paralelo
+    const gridResults = await Promise.all(gridSearchPromises);
+    
+    // 4. Consolidar IDs únicos
+    gridResults.forEach(ids => {
+      ids.forEach(id => allPlaceIds.add(id));
+    });
 
+    console.log(`Total de lugares únicos encontrados: ${allPlaceIds.size}`);
+
+    // Convertir Set a Array
+    const uniquePlaceIds = Array.from(allPlaceIds);
+
+    // 5. Filtrar lugares que ya fueron mostrados al usuario
+    const { data: searchHistory } = await supabase
+      .from('search_history')
+      .select('place_id')
+      .eq('user_id', req.user.id);
+
+    const shownPlaceIds = new Set(searchHistory?.map(h => h.place_id) || []);
+    
+    // Filtrar IDs nuevos (que no están en el historial)
+    const newPlaceIds = uniquePlaceIds.filter(placeId => !shownPlaceIds.has(placeId));
+
+    console.log(`   Lugares nuevos (no vistos antes): ${newPlaceIds.length}`);
+
+    // 6. Verificar límite del usuario
+    const remainingLimit = userProfile.total_results_limit - userProfile.results_shown;
+    
+    // 7. Limitar IDs según el límite del usuario
+    const availablePlaceIds = newPlaceIds.slice(0, remainingLimit);
+
+    console.log(`   Límite del usuario: ${remainingLimit} resultados restantes`);
+    console.log(`   IDs disponibles para cargar: ${availablePlaceIds.length}`);
+
+    // Devolver los IDs para que el frontend los cargue bajo demanda
     res.json({
-      results: detailedPlaces,
-      nextPageToken
+      placeIds: availablePlaceIds,
+      totalFound: uniquePlaceIds.length,
+      newPlaces: newPlaceIds.length,
+      availableToLoad: availablePlaceIds.length,
+      remainingLimit: remainingLimit,
+      userPlan: userProfile.plan
     });
   } catch (err) {
     console.error("Error al buscar lugares:", err.response?.data || err.message);
@@ -140,18 +298,147 @@ app.get("/search", async (req, res) => {
   }
 });
 
+// Nuevo endpoint para cargar detalles de lugares bajo demanda
+app.post("/load-details", authMiddleware, async (req, res) => {
+  const { placeIds } = req.body; // Array de IDs a cargar
+  const userProfile = req.userProfile;
+
+  if (!placeIds || !Array.isArray(placeIds) || placeIds.length === 0) {
+    return res.status(400).json({ error: "Debes enviar un array de placeIds" });
+  }
+
+  // Verificar que el usuario no exceda su límite
+  const remainingLimit = userProfile.total_results_limit - userProfile.results_shown;
+  
+  if (remainingLimit <= 0) {
+    return res.status(403).json({ 
+      error: `Has alcanzado tu límite de ${userProfile.total_results_limit} resultados.`,
+      limit_reached: true
+    });
+  }
+
+  // Limitar la cantidad de IDs a cargar según el límite restante
+  const idsToLoad = placeIds.slice(0, Math.min(placeIds.length, remainingLimit));
+
+  console.log(`Cargando detalles de ${idsToLoad.length} lugares para usuario ${req.user.email}`);
+
+  try {
+    // Cargar detalles de los lugares
+    const detailedPlacesPromises = idsToLoad.map(async placeId => {
+      try {
+        // El ID ya viene en formato "places/ChIJ..." desde el Text Search
+        // Si por alguna razón no tiene el prefijo, lo agregamos
+        const formattedId = placeId.startsWith('places/') ? placeId : `places/${placeId}`;
+        const fullUrl = `https://places.googleapis.com/v1/${formattedId}`;
+        
+        const detailResp = await axios.get(
+          fullUrl,
+          {
+            headers: {
+              "X-Goog-Api-Key": process.env.PLACES_API_KEY,
+              //Qui pido tambien international phone number, tengo que ver por que hago eso
+              "X-Goog-FieldMask": "id,displayName,formattedAddress,rating,userRatingCount,nationalPhoneNumber,internationalPhoneNumber,websiteUri,googleMapsUri"
+            }
+          }
+        );
+
+        const p = detailResp.data;
+        
+        // Validar que existan datos mínimos
+        if (!p || !p.id) {
+          console.error(`Place ${placeId} sin datos completos`);
+          return null;
+        }
+
+        return {
+          id: placeId,
+          name: p.displayName?.text || "Sin nombre",
+          address: p.formattedAddress || null,
+          rating: p.rating || null,
+          user_ratings_total: p.userRatingCount || null,
+          phone: p.nationalPhoneNumber || null,
+          international_phone: p.internationalPhoneNumber || null,
+          website: p.websiteUri || null,
+          maps_url: p.googleMapsUri || null
+        };
+      } catch (err) {
+        console.error(`Error al cargar detalles de ${placeId}:`, err.response?.data || err.message);
+        return null;
+      }
+    });
+
+    const detailedPlaces = (await Promise.all(detailedPlacesPromises)).filter(p => p !== null);
+
+    // Filtrar lugares sin phone Y sin website
+    const placesWithContact = detailedPlaces.filter(p => p.phone || p.website);
+
+    console.log(`${detailedPlaces.length} lugares cargados, ${placesWithContact.length} con contacto`);
+
+    // Guardar en historial y actualizar contador
+    if (placesWithContact.length > 0) {
+      const historyRecords = placesWithContact.map(place => ({
+        user_id: req.user.id,
+        place_id: place.id,
+        place_name: place.name,
+        address: place.address,
+        phone: place.phone,
+        international_phone: place.international_phone,
+        website: place.website,
+        rating: place.rating,
+        user_ratings_total: place.user_ratings_total,
+        maps_url: place.maps_url,
+        query: req.body.query || '',
+        city: req.body.city || '',
+        country: req.body.country || ''
+      }));
+
+      await supabase
+        .from('search_history')
+        .insert(historyRecords);
+
+      // Actualizar results_shown
+      await supabase
+        .from('user_profiles')
+        .update({ 
+          results_shown: userProfile.results_shown + placesWithContact.length 
+        })
+        .eq('id', req.user.id);
+
+      console.log(`Guardados ${placesWithContact.length} lugares en historial`);
+    }
+
+    const newRemainingLimit = remainingLimit - placesWithContact.length;
+
+    res.json({
+      places: placesWithContact,
+      loaded: placesWithContact.length,
+      newRemainingLimit: newRemainingLimit,
+      limit_reached: newRemainingLimit <= 0
+    });
+  } catch (err) {
+    console.error("Error al cargar detalles:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint para obtener historial del usuario (para el CSV)
+app.get("/history", authMiddleware, async (req, res) => {
+  try {
+    const { data: history, error } = await supabase
+      .from('search_history')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('searched_at', { ascending: false });
+
+    if (error) throw error;
+
+    res.json({ history });
+  } catch (err) {
+    console.error("Error al obtener historial:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
-
-
-
-
-
-/*
-
-Hola soy brayan fundador de prospectai. Las empresas que venden b2b y tienen a google maps como una 
-herramienta para obtener leads pierden varias horas a la semana, por que es la bsuqeda y organizacion
-de estos datos lo realizan de forma manual. Prospectai te permite buscar por tipo de negocio y en menos
-de 10 segundos obtienes una lista con miles de posibles clientes.
-*/
