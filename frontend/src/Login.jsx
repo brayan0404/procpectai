@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from './supabaseClient';
 import './Login.css';
@@ -10,6 +10,21 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Manejar confirmación de email
+  useEffect(() => {
+    // Verificar si hay un hash de confirmación en la URL
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' && session) {
+        console.log('Usuario autenticado:', session.user);
+        navigate('/');
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, [navigate]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -33,13 +48,17 @@ export default function Login() {
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
+          options: {
+            emailRedirectTo: `${window.location.origin}/`
+          }
         });
         
         if (error) throw error;
         
         console.log('Registro exitoso:', data);
-        alert('¡Cuenta creada! Revisa tu email para confirmar tu cuenta.');
-        setIsLogin(true);
+        alert('¡Cuenta creada! Revisa tu email para confirmar tu cuenta y podrás iniciar sesión.');
+        setEmail('');
+        setPassword('');
       }
     } catch (error) {
       console.error('Error de autenticación:', error);
