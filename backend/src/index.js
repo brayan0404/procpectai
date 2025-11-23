@@ -15,24 +15,26 @@ const supabase = createClient(
 );
 
 // Configurar CORS para permitir tu frontend en producción
-const allowedOrigins = [
-  'http://localhost:5173',
-  "https://prospecta-i.netlify.app"
-];
-
 app.use(cors({
-  origin: function (origin, callback) {
-    // Permitir requests sin origin (como Postman) o desde orígenes permitidos
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('No permitido por CORS'));
-    }
-  },
+  origin: '*',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
+
+// Headers adicionales para asegurar CORS
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  // Manejar preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
