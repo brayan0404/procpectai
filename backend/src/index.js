@@ -15,8 +15,19 @@ const supabase = createClient(
 );
 
 // Configurar CORS para permitir tu frontend en producción
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://prospecta-i.netlify.app'
+];
+
 app.use(cors({
-  origin: '*',
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('No permitido por CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -24,12 +35,14 @@ app.use(cors({
 
 // Headers adicionales para asegurar CORS
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
   res.header('Access-Control-Allow-Credentials', 'true');
   
-  // Manejar preflight requests
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -298,11 +311,14 @@ app.get("/search", authMiddleware, async (req, res) => {
     // 6. Verificar límite del usuario
     const remainingLimit = userProfile.total_results_limit - userProfile.results_shown;
     
-    // 7. Limitar IDs según el límite del usuario
-    const availablePlaceIds = newPlaceIds.slice(0, remainingLimit);
+    // 7. Enviar más IDs de los necesarios (3x) porque no todos tienen contacto
+    // Esto permite que el frontend siga intentando hasta completar el límite con lugares válidos
+    const bufferMultiplier = 3;
+    const idsToSend = Math.min(newPlaceIds.length, remainingLimit * bufferMultiplier);
+    const availablePlaceIds = newPlaceIds.slice(0, idsToSend);
 
     console.log(`   Límite del usuario: ${remainingLimit} resultados restantes`);
-    console.log(`   IDs disponibles para cargar: ${availablePlaceIds.length}`);
+    console.log(`   IDs disponibles para cargar: ${availablePlaceIds.length} (${bufferMultiplier}x buffer)`);
 
     // Devolver los IDs para que el frontend los cargue bajo demanda
     res.json({
@@ -338,17 +354,15 @@ app.post("/load-details", authMiddleware, async (req, res) => {
     });
   }
 
-  // Limitar la cantidad de IDs a cargar según el límite restante
-  const idsToLoad = placeIds.slice(0, Math.min(placeIds.length, remainingLimit));
+  // El frontend envía los IDs en lotes de 20
+  const idsToLoad = placeIds;
 
-  console.log(`Cargando detalles de ${idsToLoad.length} lugares para usuario ${req.user.email}`);
+  console.log(`Cargando detalles de ${idsToLoad.length} lugares para usuario ${req.user.email} (límite restante: ${remainingLimit})`);
 
   try {
     // Cargar detalles de los lugares
     const detailedPlacesPromises = idsToLoad.map(async placeId => {
       try {
-        // El ID ya viene en formato "places/ChIJ..." desde el Text Search
-        // Si por alguna razón no tiene el prefijo, lo agregamos
         const formattedId = placeId.startsWith('places/') ? placeId : `places/${placeId}`;
         const fullUrl = `https://places.googleapis.com/v1/${formattedId}`;
         
@@ -357,7 +371,6 @@ app.post("/load-details", authMiddleware, async (req, res) => {
           {
             headers: {
               "X-Goog-Api-Key": process.env.PLACES_API_KEY,
-              //Qui pido tambien international phone number, tengo que ver por que hago eso
               "X-Goog-FieldMask": "id,displayName,formattedAddress,rating,userRatingCount,nationalPhoneNumber,internationalPhoneNumber,websiteUri,googleMapsUri"
             }
           }
@@ -365,9 +378,7 @@ app.post("/load-details", authMiddleware, async (req, res) => {
 
         const p = detailResp.data;
         
-        // Validar que existan datos mínimos
         if (!p || !p.id) {
-          console.error(`Place ${placeId} sin datos completos`);
           return null;
         }
 
@@ -389,15 +400,20 @@ app.post("/load-details", authMiddleware, async (req, res) => {
     });
 
     const detailedPlaces = (await Promise.all(detailedPlacesPromises)).filter(p => p !== null);
-
-    // Filtrar lugares sin phone Y sin website
+    
+    // Filtrar lugares con contacto
     const placesWithContact = detailedPlaces.filter(p => p.phone || p.website);
+    
+    console.log(`Lote procesado: ${detailedPlaces.length} lugares, ${placesWithContact.length} con contacto`);
 
-    console.log(`${detailedPlaces.length} lugares cargados, ${placesWithContact.length} con contacto`);
+    // Limitar resultados según el espacio disponible del usuario
+    const placesToSave = placesWithContact.slice(0, remainingLimit);
 
-    // Guardar en historial y actualizar contador
-    if (placesWithContact.length > 0) {
-      const historyRecords = placesWithContact.map(place => ({
+    console.log(`Guardando ${placesToSave.length} de ${placesWithContact.length} con contacto (límite: ${remainingLimit})`);
+
+    // Guardar en historial solo los que caben en el límite
+    if (placesToSave.length > 0) {
+      const historyRecords = placesToSave.map(place => ({
         user_id: req.user.id,
         place_id: place.id,
         place_name: place.name,
@@ -417,22 +433,22 @@ app.post("/load-details", authMiddleware, async (req, res) => {
         .from('search_history')
         .insert(historyRecords);
 
-      // Actualizar results_shown
+      // Actualizar results_shown solo con los que guardamos
       await supabase
         .from('user_profiles')
         .update({ 
-          results_shown: userProfile.results_shown + placesWithContact.length 
+          results_shown: userProfile.results_shown + placesToSave.length 
         })
         .eq('id', req.user.id);
 
-      console.log(`Guardados ${placesWithContact.length} lugares en historial`);
+      console.log(`Guardados ${placesToSave.length} lugares con contacto en historial`);
     }
 
-    const newRemainingLimit = remainingLimit - placesWithContact.length;
+    const newRemainingLimit = remainingLimit - placesToSave.length;
 
     res.json({
-      places: placesWithContact,
-      loaded: placesWithContact.length,
+      places: placesToSave,
+      loaded: placesToSave.length,
       newRemainingLimit: newRemainingLimit,
       limit_reached: newRemainingLimit <= 0
     });

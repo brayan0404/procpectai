@@ -182,10 +182,13 @@ function App() {
       
       // Continuar cargando hasta obtener targetCount resultados con contacto o agotar los IDs
       while (totalLoaded < targetCount && currentIndex < placeIds.length) {
-        // Cargar los siguientes 20 IDs
-        const idsToLoad = placeIds.slice(currentIndex, currentIndex + 20);
+        // Calcular cuántos resultados nos faltan para completar el objetivo
+        const remaining = targetCount - totalLoaded;
         
-        console.log(`Cargando ${idsToLoad.length} lugares (${currentIndex + 1} - ${currentIndex + idsToLoad.length})`);
+        // Pedir EXACTAMENTE la cantidad que falta (sin buffer)
+        const idsToLoad = placeIds.slice(currentIndex, currentIndex + remaining);
+        
+        console.log(`Faltan ${remaining} resultados. Pidiendo ${idsToLoad.length} IDs (índice ${currentIndex + 1} - ${currentIndex + idsToLoad.length})`);
 
         const { data: { session } } = await supabase.auth.getSession();
 
@@ -218,20 +221,23 @@ function App() {
         currentIndex += idsToLoad.length;
         setLoadedCount(currentIndex);
 
-        console.log(`Cargados ${data.loaded} lugares con contacto (${totalLoaded} total hasta ahora)`);
+        console.log(`Cargados ${data.loaded} de ${idsToLoad.length} IDs. Total con contacto: ${totalLoaded}/${targetCount}`);
         
         // Si ya no hay más IDs, salir
         if (currentIndex >= placeIds.length) {
+          console.log('Se agotaron los IDs disponibles');
           break;
         }
         
         // Si ya tenemos suficientes resultados con contacto, salir
         if (totalLoaded >= targetCount) {
+          console.log('Objetivo alcanzado');
           break;
         }
         
-        // Si el backend indica que alcanzamos el límite (ya no puede guardar más), salir
+        // Si el backend indica que alcanzamos el límite del usuario, salir
         if (data.limit_reached) {
+          console.log('Límite del usuario alcanzado');
           break;
         }
       }
