@@ -460,6 +460,9 @@ app.get("/history", authMiddleware, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  console.log(`🌍 CORS habilitado para todos los orígenes`);
+  console.log(`📍 Supabase URL: ${process.env.SUPABASE_URL ? 'Configurada ✓' : 'NO CONFIGURADA ✗'}`);
+  console.log(`🔑 API Key: ${process.env.PLACES_API_KEY ? 'Configurada ✓' : 'NO CONFIGURADA ✗'}`);
 });
