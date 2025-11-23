@@ -17,7 +17,7 @@ const supabase = createClient(
 // Configurar CORS para permitir tu frontend en producción
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://prospecta-i.netlify.app'
+  "https://prospecta-i.netlify.app"
 ];
 
 app.use(cors({
